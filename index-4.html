@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>视频倒放工具</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#f5f7fb;color:#172033;font-family:system-ui,-apple-system,"Microsoft YaHei",sans-serif}
+.wrap{max-width:760px;margin:auto;padding:28px 16px 44px}
+h1{text-align:center;margin:0 0 8px;font-size:28px}.sub{text-align:center;color:#68758a;margin-bottom:22px}
+.card{background:#fff;border:1px solid #e4e9f0;border-radius:18px;padding:20px;box-shadow:0 8px 28px #0000000a}
+.drop{border:2px dashed #cbd4df;border-radius:14px;padding:40px 14px;text-align:center;cursor:pointer}
+.icon{font-size:42px}.drop b{font-size:17px}.hint{margin-top:8px;color:#7a8798;font-size:13px}
+input{display:none}.info{display:none;margin-top:18px}.name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.meta{color:#7a8798;font-size:13px;margin-top:5px}
+video{display:none;width:100%;max-height:430px;background:#10151c;border-radius:12px;margin-top:14px}
+.row{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+button{border:0;border-radius:10px;padding:12px 18px;font-size:15px}
+.primary{background:#246bfe;color:#fff}.ghost{background:#edf1f6;color:#273348}
+button:disabled{opacity:.55}
+.progress{display:none;margin-top:18px}.bar{height:9px;border-radius:9px;background:#e8edf3;overflow:hidden}
+.fill{height:100%;width:0;background:#246bfe}.status{font-size:13px;color:#657287;margin-top:8px;word-break:break-word}
+.download{display:none;margin-top:18px;text-align:center}.download a{display:inline-block;text-decoration:none}
+.note{text-align:center;color:#8994a3;font-size:12px;line-height:1.6;margin-top:16px}
+.warn{display:none;background:#fff7df;border:1px solid #f0d58a;color:#705a1b;padding:10px 12px;border-radius:10px;font-size:13px;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>视频倒放工具</h1>
+<div class="sub">完全在浏览器本地处理，不上传视频</div>
+<div class="card">
+  <div class="drop" id="drop">
+    <div class="icon">🎬</div>
+    <div><b>点击选择视频</b> 或把视频拖到这里</div>
+    <div class="hint">支持手机常见 MP4、MOV、WebM 等格式</div>
+    <input id="file" type="file" accept="video/*">
+  </div>
+
+  <div class="info" id="info">
+    <div class="name" id="name"></div>
+    <div class="meta" id="meta"></div>
+    <video id="preview" controls playsinline></video>
+    <div class="warn" id="warn">新版不依赖 FFmpeg，输出为 WebM；部分手机浏览器可能不支持倒放超长/超高分辨率视频。</div>
+    <div class="row">
+      <button class="primary" id="reverse">开始倒放</button>
+      <button class="ghost" id="clear">重新选择</button>
+    </div>
+  </div>
+
+  <div class="progress" id="progress">
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="status" id="status">准备中…</div>
+  </div>
+  <div class="download" id="download"></div>
+</div>
+<div class="note">不使用 FFmpeg、不使用跨域 Worker。<br>倒放时会逐帧读取视频，因此长视频会比播放速度慢一些。</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+let current=null, objectUrl=null;
+
+function pick(file){
+  if(!file) return;
+  if(!file.type.startsWith("video/")){alert("请选择视频文件");return}
+  current=file;
+  $("name").textContent=file.name;
+  $("meta").textContent=(file.size/1024/1024).toFixed(1)+" MB · "+(file.type||"video");
+  $("info").style.display="block";
+  $("warn").style.display="block";
+  $("progress").style.display="none";
+  $("download").style.display="none";
+  $("download").innerHTML="";
+  if(objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl=URL.createObjectURL(file);
+  $("preview").src=objectUrl;
+  $("preview").style.display="block";
+}
+$("drop").onclick=()=>$("file").click();
+$("file").onchange=e=>pick(e.target.files[0]);
+$("drop").ondragover=e=>{e.preventDefault()};
+$("drop").ondrop=e=>{e.preventDefault();pick(e.dataTransfer.files[0])};
+$("clear").onclick=()=>location.reload();
+
+function waitEvent(el,name,timeout=10000){
+  return new Promise((resolve,reject)=>{
+    let done=false;
+    const timer=setTimeout(()=>finish(new Error("视频读取超时")),timeout);
+    function finish(err){
+      if(done)return;done=true;clearTimeout(timer);el.removeEventListener(name,ok);
+      err?reject(err):resolve();
+    }
+    function ok(){finish()}
+    el.addEventListener(name,ok,{once:true});
+  });
+}
+
+async function seek(video,time){
+  if(Math.abs(video.currentTime-time)<0.0005)return;
+  video.currentTime=Math.max(0,Math.min(video.duration,time));
+  await waitEvent(video,"seeked",15000);
+}
+
+function getMime(){
+  const list=[
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4;codecs=avc1.4D401E,mp4a.40.2",
+    "video/mp4",
+    "video/webm;codecs=vp8,opus",
+    "video/webm;codecs=vp9,opus",
+    "video/webm"
+  ];
+  return list.find(x=>MediaRecorder.isTypeSupported(x))||"";
+}
+
+async function reverseVideo(){
+  if(!current)return;
+  const mime=getMime();
+  if(!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream || !mime){
+    throw new Error("你的浏览器不支持本地视频录制，请使用最新版 Chrome/Edge");
+  }
+
+  $("reverse").disabled=true;
+  $("progress").style.display="block";
+  $("download").style.display="none";
+  $("fill").style.width="2%";
+  $("status").textContent="正在快速解码视频…";
+
+  const v=document.createElement("video");
+  v.src=objectUrl;
+  v.muted=true;
+  v.playsInline=true;
+  v.preload="auto";
+  await waitEvent(v,"loadedmetadata",15000);
+  await waitEvent(v,"loadeddata",15000);
+
+  const duration=v.duration;
+  if(!isFinite(duration)||duration<=0) throw new Error("无法读取视频时长");
+  if(duration>60) throw new Error("为了保证手机处理速度，暂时限制视频长度为 60 秒");
+
+  const maxW=1280;
+  const scale=Math.min(1,maxW/v.videoWidth);
+  const w=Math.max(2,Math.round(v.videoWidth*scale));
+  const h=Math.max(2,Math.round(v.videoHeight*scale));
+  // 24fps gives smooth playback while keeping mobile memory usage reasonable.
+  const fps=24;
+
+  const canvas=document.createElement("canvas");
+  canvas.width=w;canvas.height=h;
+  const ctx=canvas.getContext("2d",{alpha:false,desynchronized:true});
+  const stream=canvas.captureStream(fps);
+
+  // Decode audio and reverse the PCM samples.
+  let audioCtx=null,audioSource=null,audioDest=null;
+  try{
+    const buf=await current.arrayBuffer();
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    const decoded=await audioCtx.decodeAudioData(buf.slice(0));
+    const rev=audioCtx.createBuffer(decoded.numberOfChannels,decoded.length,decoded.sampleRate);
+    for(let c=0;c<decoded.numberOfChannels;c++){
+      const src=decoded.getChannelData(c), dst=rev.getChannelData(c);
+      for(let i=0,j=src.length-1;i<src.length;i++,j--) dst[i]=src[j];
+    }
+    audioSource=audioCtx.createBufferSource();
+    audioSource.buffer=rev;
+    audioDest=audioCtx.createMediaStreamDestination();
+    audioSource.connect(audioDest);
+    for(const track of audioDest.stream.getAudioTracks()) stream.addTrack(track);
+  }catch(e){}
+
+  // First pass: play the source normally and cache decoded frames in memory.
+  // This avoids the extremely slow "seek -> seeked -> draw" loop on phones.
+  const frames=[];
+  const maxFrames=Math.ceil(duration*fps);
+  let collecting=true;
+  let lastMediaTime=-1;
+
+  const collectFrame=async(now,meta)=>{
+    if(!collecting)return;
+    const mt=meta.mediaTime;
+    if(mt>=lastMediaTime+0.001){
+      lastMediaTime=mt;
+      ctx.drawImage(v,0,0,w,h);
+      try{
+        frames.push(await createImageBitmap(canvas));
+      }catch(e){
+        frames.push(null);
+      }
+      $("fill").style.width=Math.round(Math.min(frames.length/maxFrames,0.5)*100)+"%";
+      $("status").textContent="正在快速读取视频… "+Math.round(Math.min(frames.length/maxFrames,0.5)*100)+"%";
+    }
+    if(collecting && frames.length<maxFrames && !v.ended){
+      v.requestVideoFrameCallback(collectFrame);
+    }
+  };
+
+  if("requestVideoFrameCallback" in HTMLVideoElement.prototype){
+    v.requestVideoFrameCallback(collectFrame);
+    await v.play();
+    await new Promise(resolve=>{
+      const check=()=>{
+        if(v.ended || frames.length>=maxFrames){resolve();return;}
+        setTimeout(check,50);
+      };
+      check();
+    });
+    collecting=false;
+    v.pause();
+  }else{
+    // Older browsers: sample using a modest number of seeks.
+    const fallbackFps=15;
+    for(let i=0;i<Math.ceil(duration*fallbackFps);i++){
+      const tm=Math.min(duration-0.001,i/fallbackFps);
+      await seek(v,tm);
+      ctx.drawImage(v,0,0,w,h);
+      try{frames.push(await createImageBitmap(canvas));}catch(e){frames.push(null)}
+    }
+  }
+
+  if(!frames.length) throw new Error("视频解码失败，请换一个视频再试");
+
+  const chunks=[];
+  const recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:Math.min(8000000,Math.max(2500000,w*h*4))});
+  recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
+  const stopped=new Promise((resolve,reject)=>{
+    recorder.onstop=resolve;
+    recorder.onerror=e=>reject(e.error||new Error("录制失败"));
+  });
+
+  recorder.start(250);
+  if(audioSource){try{await audioCtx.resume();audioSource.start()}catch(e){}}
+
+  // Second pass: draw cached frames backwards. No seeking, so this is smooth and fast.
+  $("status").textContent="正在生成倒放视频…";
+  const total=frames.length;
+  const frameDelay=1000/fps;
+  for(let i=total-1;i>=0;i--){
+    const frame=frames[i];
+    if(frame) ctx.drawImage(frame,0,0,w,h);
+    else { try{await seek(v,Math.max(0,(i/total)*duration));ctx.drawImage(v,0,0,w,h)}catch(e){} }
+    $("fill").style.width=Math.round((total-i)/total*96)+"%";
+    $("status").textContent="正在倒放… "+Math.round((total-i)/total*100)+"%";
+    await new Promise(r=>setTimeout(r,frameDelay));
+  }
+
+  recorder.stop();
+  if(audioSource){try{audioSource.stop()}catch(e){}}
+  await stopped;
+  if(audioCtx)try{await audioCtx.close()}catch(e){}
+  for(const frame of frames){if(frame)try{frame.close()}catch(e){}}
+
+  const out=new Blob(chunks,{type:mime});
+  const url=URL.createObjectURL(out);
+  const a=document.createElement("a");
+  a.href=url;
+  const ext=mime.startsWith("video/mp4")?".mp4":".webm";
+  a.download="reversed_"+current.name.replace(/\.[^.]+$/,"" )+ext;
+  a.className="primary";
+  a.style.display="inline-block";
+  a.style.padding="12px 18px";
+  a.style.borderRadius="10px";
+  a.style.color="#fff";
+  a.textContent="⬇ 下载倒放视频";
+  $("download").innerHTML="";
+  $("download").appendChild(a);
+  $("download").style.display="block";
+  $("fill").style.width="100%";
+  $("status").textContent="处理完成！输出格式：MP4 优先（浏览器支持时输出 MP4，否则 WebM）";
+}
+
+$("reverse").onclick=async()=>{
+  try{await reverseVideo()}
+  catch(e){
+    console.error(e);
+    $("fill").style.width="0";
+    $("status").textContent="处理失败："+(e.message||String(e));
+  }finally{$("reverse").disabled=false}
+};
+</script>
+</body>
+</html>
